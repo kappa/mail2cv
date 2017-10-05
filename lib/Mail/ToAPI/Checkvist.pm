@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use 5.010;
 our $VERSION = '0.4';
+#no warnings 'experimental::smartmatch';
 
 use WebService::Simple;
 use Email::MIME;
@@ -72,17 +73,26 @@ sub _parse_to {
 sub parse_email {
     my $fh = pop;
 
-    my ($from, $to, $subject);
+    my ($from, $to, $item_text);
 
     binmode $fh, ':bytes';
     my $email = Email::MIME->new(join "", <$fh>);
 
-    $subject = $email->header('Subject');
     $from = (Email::Address->parse($email->header_obj->header_raw('From')))[0]->address;
 
-    my ($login, $remotekey, $list_id, $list_tag) = _parse_to($email->header_obj->header_raw('To'));
+    my $to_header = $email->header_obj->header_raw('Delivered-To') // $email->header_obj->header_raw('To');
+    my ($login, $remotekey, $list_id, $list_tag) = _parse_to($to_header);
 
     my ($body_text, $files)   = _parse_for_content($email);
+    
+    my @lines = split(/\n/, $body_text || 'Created from E-Mail');
+    $item_text = $email->header('Subject') || $lines[0];
+    $item_text =~ s/\s+$//;
+    if ($item_text eq $body_text) {
+	    # Remove note if its text is the same as item text
+	    undef $body_text;
+	}
+	#say STDERR "Item text: $item_text";
 
     $Last_Error = '';
     return {
@@ -93,7 +103,7 @@ sub parse_email {
 
         list_id     => $list_id,
         list_tag    => $list_tag,
-        text        => $subject,
+        text        => $item_text,
 
         ($body_text
             ? (note         => $body_text)
@@ -142,13 +152,16 @@ sub _add_task {
         Content => [
             import_content  => encode_utf8($job->{text}),
             parse_tasks     => 1,
+            from_email      => 1,
             remote_key      => $job->{remotekey},
         ],
     );
 
     if ($job->{note}) {
+	    my $patched4markdown = $job->{note};
+	    $patched4markdown =~ s/(\r?\n)/  $1/g;
         push @{$post_params{Content}},
-            import_content_note => encode_utf8($job->{note});
+            import_content_note => encode_utf8($patched4markdown);
     }
 
     # in: [ [$filename, $content_type, $data] ... ]
@@ -160,14 +173,16 @@ sub _add_task {
         my $num = 1;
         for my $file (@{$job->{files}}) {
             my $ct = Mail::ToAPI::Text::_parse_header_fields("ct=$file->[1]");
-            push @{$post_params{Content}},
-                "add_files[$num]"   => [
-                    undef,
-                    encode_utf8($file->[0]),    # XXX
-                    Content_Type    => $file->[1],
-                    Content         => ($ct->{charset} ? encode($ct->{charset}, $file->[2]) : $file->[2]),
-                ];
-            ++$num;
+            if ($file->[0]) {
+	            push @{$post_params{Content}},
+	                "add_files[$num]"   => [
+	                    undef,
+	                    encode_utf8($file->[0]),    # XXX
+	                    Content_Type    => $file->[1],
+	                    Content         => ($ct->{charset} ? encode($ct->{charset}, $file->[2]) : $file->[2]),
+	                ];
+	            ++$num;
+			}
         }
     }
 

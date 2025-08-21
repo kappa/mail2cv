@@ -3,6 +3,7 @@ package Mail::ToAPI::Text;
 use strict;
 use 5.010;
 our $VERSION = '0.1';
+#no warnings 'experimental::smartmatch';
 
 use parent qw/Exporter/;
 use HTML::Parser;
@@ -54,11 +55,15 @@ sub _parse_ct_and_disp {
 sub _conjure_filename {
     my ($ct, $disp) = @_;
 
-    return $disp->{filename} // $ct->{name}
+    my $res = $disp->{filename} // $ct->{name}
         // do {
             (my $content_type = $ct->{ct}) =~ s{/}{-};
             "$content_type-file";
         };
+    if ($res =~ /rfc822-file$/) {
+        $res .= ".eml";
+    }
+    return $res;
 }
 
 sub _may_contain_text {
@@ -83,19 +88,18 @@ sub _render_recur {
     my $filename = _conjure_filename($ct, $disp);
 
     if ($disp && $disp->{d} && $disp->{d} eq 'attachment') {
-        push @$files, [$disp->{filename}, $content_type,
+        push @$files, [$filename, $content_type,
             $content_type =~ /^text\// ? $part->body_str : $part->body];
     }
     else {
-        given ($content_type) {
-            when ('multipart/alternative') {
+            if ($content_type eq 'multipart/alternative') {
                 # choose the last of all supported, may also be
                 # implemented as (grep)[-1]
                 # if there's 1 subpart, always return it
                 my $best_part = reduce { _may_contain_text($b) ? $b : $a } $part->subparts;
                 ($result_str, $files) = _render_recur($best_part);
             }
-            when (m{^multipart/}) { # 'mixed', 'related' and all others
+            elsif ($content_type =~ m{^multipart/}) { # 'mixed', 'related' and all others
                 for my $subpart ($part->subparts) {
                     my ($part_str, $part_files) = _render_recur($subpart);
                     if (_may_contain_text($subpart)) {
@@ -105,19 +109,18 @@ sub _render_recur {
                 }
                 $result_str =~ s/\n\z//; # emulate join
             }
-            when ('text/html') {
+            elsif ($content_type eq 'text/html') {
                 $result_str = textify_html($part->body_str);
             }
-            when (m{^text/}) {
+            elsif ($content_type =~ m{^text/}) {
                 $result_str = $part->body_str;
             }
-            default {
+            else {
                 # cannot render this part inline, so emulate attachment
                 # should not happen very often
                 push @$files, [$filename, $content_type,
                     $content_type =~ /^text\// ? $part->body_str : $part->body];
             }
-        }
     }
 
     return ($result_str, $files);
@@ -131,8 +134,10 @@ sub _parse_for_content {
     $body_str =~ s/^\s+//s;
 
     $body_str =~ s/(?:\r?\n|^)--[ ]?\r?\n.*\z//s;
+    
+    $body_str =~ s/ *=\r?\n?\z//s;
 
-    $body_str =~ s/\s+\z//s;
+    $body_str =~ s/[\r?\n\s]+\z//s;
 
     return ($body_str, $files);
 }
